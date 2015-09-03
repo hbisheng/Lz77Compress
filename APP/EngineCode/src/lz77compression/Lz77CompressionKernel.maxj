@@ -1,0 +1,25 @@
+package lz77compression;
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.DFEVar;
+
+class Lz77CompressionKernel extends Kernel {
+
+	private static final DFEType type = dfeInt(32);
+
+	protected Lz77CompressionKernel(KernelParameters parameters) {
+		super(parameters);
+
+		DFEVar x = io.input("x", type);
+		DFEVar y = io.input("y", type);
+		DFEVar a = io.scalarInput("a", type);
+
+		// TODO replace with your computation
+		DFEVar sum = x + y + a;
+
+		io.output("s", sum, type);
+	}
+
+}
