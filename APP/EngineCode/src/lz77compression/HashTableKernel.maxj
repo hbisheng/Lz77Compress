@@ -1,0 +1,94 @@
+/*
+    HashTable module:
+
+    input: 
+        {COMPARE_CNT} hash values        
+        
+    do:
+        There are {COMPARE_CNT} hashTables in the kernel,
+        1. In each hashTable, use all the {COMPARE_CNT} hashValues as buckets, get {COMPARE_CNT} positions 
+        2. store each of the {COMPARE_CNT} hashValue in its corresponding hashTable
+        
+    output:
+        To each replication of Matching Kernel(there are {COMPARE_CNT} replications):
+            {COMPARE_CNT} indices (The indices corresponding to one of the hash values)
+            {COMPARE_CNT} bytesToCompare (the current input window starting from this position)
+            {COMPARE_CNT} bytesToStore (the bytes that should be stored in the history buffer)
+        
+*/
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.*;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVector;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVectorType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.memory.Memory;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.CounterChain;
+import com.maxeler.maxcompiler.v2.utils.MathUtils;
+
+class HashTableKernel extends Kernel {
+
+    private static DFEType COMPARE_TYPE = dfeUInt(9);
+    protected HashTableKernel(KernelParameters parameters, int COMPARE_CNT, int HASH_SIZE, int WINDOW_SIZE){
+        super(parameters);
+        
+        int RAM_DEPTH = WINDOW_SIZE / COMPARE_CNT;
+        DFEType HASH_TYPE   = dfeUInt(MathUtils.bitsToAddress(HASH_SIZE));
+        DFEType INDICE_TYPE = dfeUInt(MathUtils.bitsToAddress(WINDOW_SIZE));
+
+        DFEVector<DFEVar> input = io.input("hashValues", new DFEVectorType<DFEVar>(HASH_TYPE, COMPARE_CNT));
+        CounterChain chain = control.count.makeCounterChain();
+        DFEVar cycleCount = chain.addCounter(RAM_DEPTH, 1);
+        
+        DFEVar globalCounter = control.count.simpleCounter(64);
+
+        DFEVar indexCand[][] = new DFEVar[COMPARE_CNT][COMPARE_CNT];
+        for(int i = 0; i < COMPARE_CNT; i++)
+        {
+            // Allocate {COMPARE_CNT} hash tables
+            Memory<DFEVar> table = mem.alloc(INDICE_TYPE, HASH_SIZE);
+            
+            // The {COMPARE_CNT} hash values are stored in different hash tables
+            table.write(input[i], (cycleCount).cast(INDICE_TYPE) * COMPARE_CNT + i, constant.var(dfeBool(), 1));
+                
+            // For each hash value, get {COMPARE_CNT} candidates
+            for(int j = 0; j < COMPARE_CNT; j++)
+            {    
+                DFEVar indexValue = table.read(input[j]);
+                indexCand[j][i] = 
+                    (globalCounter < WINDOW_SIZE/COMPARE_CNT & indexValue.cast(globalCounter.getType()) > globalCounter*COMPARE_CNT ) 
+                    ? constant.var(INDICE_TYPE, 0) : indexValue; 
+            }
+        }
+        
+        for(int i = 0; i < COMPARE_CNT; i++)
+        {
+            // Output the indices to the No.i Matching Kernel
+            DFEVector<DFEVar> indiceForCompare = (new DFEVectorType<DFEVar>(INDICE_TYPE, COMPARE_CNT)).newInstance(this);
+            for(int j = 0; j < COMPARE_CNT; j++)
+            {
+                indiceForCompare[j] <== indexCand[i][j];
+            }
+            io.output( "index"+i , indiceForCompare, indiceForCompare.getType());
+        }
+        
+        DFEVector<DFEVar> bytesBuffer = io.input("bytesBuffer", new DFEVectorType<DFEVar>(COMPARE_TYPE, COMPARE_CNT*2-1)); 
+        for(int i = 0; i < COMPARE_CNT; i++)
+        {
+            // the bytes that should be stored in the history buffer
+            DFEVector<DFEVar> bytesStore   = new DFEVectorType<DFEVar>(dfeUInt(8), COMPARE_CNT).newInstance(this);
+            
+            // the current input window starting from position i
+            DFEVector<DFEVar> bytesCompare = new DFEVectorType<DFEVar>(COMPARE_TYPE, COMPARE_CNT).newInstance(this);
+            for(int j = 0; j < COMPARE_CNT; j++)
+            {
+                bytesStore[j]      <== bytesBuffer[j].cast(dfeUInt(8));
+                bytesCompare[j]    <== bytesBuffer[i + j];
+            }
+            io.output("bytesToStore"+i, bytesStore, bytesStore.getType()); 
+            io.output("bytesToCompare"+i, bytesCompare, bytesCompare.getType());
+        }
+        
+    }  
+}
+

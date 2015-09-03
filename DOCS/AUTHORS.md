@@ -11,4 +11,6 @@ Development Lead
 Contributors
 ------------
 
-None yet. Why not be the first?
+* Xinyu Niu
+* Wayne Luk
+

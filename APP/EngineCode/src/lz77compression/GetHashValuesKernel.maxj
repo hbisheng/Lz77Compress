@@ -1,0 +1,75 @@
+/*
+    HashKernel 
+    
+    input: 
+        {INPUT_SIZE} bytes 
+    
+    output:
+        to hashTableKernel
+            {INPUT_SIZE} hashValues
+            {2*INPUT_SIZE} bytes (current input window and some buffer data)
+*/
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.*;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVector;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVectorType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.CounterChain;
+
+class GetHashValuesKernel extends Kernel {
+
+    private static final DFEType INPUT_TYPE = dfeUInt(8);
+    private static final DFEType HASH_TYPE = dfeUInt(10);
+    private static final int OUT_OF_RANGE = 257;
+
+    protected GetHashValuesKernel(KernelParameters parameters, int MAX_UNCODED, int COMPARE_CNT, int HASH_SIZE)
+    {
+        super(parameters);
+        
+        int INPUT_SIZE = COMPARE_CNT;   
+        int OUTPUT_SIZE = COMPARE_CNT;
+    
+        DFEVar dataSize = io.scalarInput("dataSize",dfeUInt(64));
+        CounterChain chain = control.count.makeCounterChain();
+        DFEVar cycleCount = chain.addCounter(dataSize/COMPARE_CNT, 1);
+        
+        DFEVector<DFEVar> input = io.input("input", new DFEVectorType<DFEVar>(INPUT_TYPE, INPUT_SIZE));
+        DFEVector<DFEVar> output = (new DFEVectorType<DFEVar>(HASH_TYPE,OUTPUT_SIZE)).newInstance(this);
+        
+        // HashKey calculation
+        for(int i = 0; i < INPUT_SIZE; i++)
+        {
+            DFEVar hashKey = constant.var(dfeInt(32),0);
+            for(int j = 0; j < MAX_UNCODED+1; j++)
+            {
+                DFEVar val = (i+j<INPUT_SIZE) ? input[i+j] : stream.offset(input[i+j-INPUT_SIZE],1);
+                DFEVar c = (hashKey << 5) ^ val.cast(dfeInt(32));
+                DFEVar q = c / HASH_SIZE;
+                DFEVar r = c - q * HASH_SIZE;
+                hashKey = r < 0 ? r + HASH_SIZE: r;
+            }
+            output[i] <== hashKey.cast(HASH_TYPE);
+        }
+
+        // Send {INPUT_CNT} hash values To HashTableKernel
+        io.output("hashValues", output, output.getType());
+        
+        // Send {INPUT_CNT*2 -1} bytes to HashTableKernel
+        DFEType COMPARE_TYPE = dfeUInt(9);
+        DFEVector<DFEVar> bytesBuffer = (new DFEVectorType<DFEVar>(COMPARE_TYPE, COMPARE_CNT+COMPARE_CNT-1)).newInstance(this); 
+        for(int i = 0; i < COMPARE_CNT*2-1; i++)
+        {
+            if(i < COMPARE_CNT)
+            {
+                bytesBuffer[i] <== input[i].cast(COMPARE_TYPE);
+            }
+            else
+            {
+                bytesBuffer[i] <== (cycleCount === (dataSize/8 - 1)) ?
+                    constant.var(COMPARE_TYPE, OUT_OF_RANGE) : stream.offset(input[i - COMPARE_CNT], 1).cast(COMPARE_TYPE); 
+            }
+        }
+        io.output("bytesBuffer", bytesBuffer, bytesBuffer.getType());
+    }   
+}

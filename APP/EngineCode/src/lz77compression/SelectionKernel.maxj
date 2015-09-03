@@ -1,0 +1,144 @@
+/*
+    input: 
+        {COMPARE_CNT} lengths
+        {COMPARE_CNT} offsets
+    
+    output:
+        {COMPARE_CNT} Valid_Bits
+        {COMPARE_CNT} Data_Bits
+
+*/
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.*;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVector;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVectorType;
+import com.maxeler.maxcompiler.v2.utils.MathUtils;
+
+class SelectionKernel extends Kernel {
+
+    protected SelectionKernel(KernelParameters parameters, int MAX_UNCODED, int  COMPARE_CNT, int WINDOW_SIZE){
+        super(parameters);
+        
+        DFEType LENGTH_TYPE = dfeUInt(8);
+        DFEType OFFSET_TYPE = dfeUInt(MathUtils.bitsToAddress(WINDOW_SIZE));
+        DFEType TEMP_TYPE = dfeInt(32);
+        int LENGTH_BITS = 3;
+        int OFFSET_BITS = MathUtils.bitsToAddress(WINDOW_SIZE);
+        int ENCODED_LENGTH = 1 + LENGTH_BITS + OFFSET_BITS;   // 1 + 12 + 4
+        int UNENCODED_LENGTH = 9;  // 1 + 8
+
+        DFEVar bytes[] = new DFEVar[COMPARE_CNT];
+        for(int i = 0; i < COMPARE_CNT; i++)
+        {
+            bytes[i] = io.input("byte"+i, dfeUInt(8));
+        }
+        DFEVar length[] = new DFEVar[COMPARE_CNT];
+        DFEVar offset[] = new DFEVar[COMPARE_CNT];
+        
+        for(int i = 0; i < COMPARE_CNT; i++)
+        {
+            length[i] = io.input(String.format("length%d",i), LENGTH_TYPE);
+            offset[i] = io.input(String.format("offset%d", i), OFFSET_TYPE);
+        }
+
+        // In previous window, get the longest match into the current window
+        DFEVar prevFarthest = constant.var(TEMP_TYPE,0);
+        for(int i = 0; i < COMPARE_CNT; i++)
+        {
+            DFEVar reach = stream.offset(length[i], -1).cast(TEMP_TYPE) + i - COMPARE_CNT;
+            prevFarthest = (prevFarthest < reach & stream.offset(length[i], -1) > MAX_UNCODED) 
+                ? reach : prevFarthest;  // make sure the HEAD match is a valid match
+        }
+        // The first available place is defined as HEAD
+        DFEVar head = prevFarthest;
+        
+        // Then In the current window, try to get the longest match into the next window
+        // the match index and the position it reaches
+        DFEVar tailReach    = constant.var(TEMP_TYPE, 0);
+        DFEVar tailIndex    = constant.var(TEMP_TYPE, 0);
+        DFEVar tailLength   = constant.var(LENGTH_TYPE, 0);
+        
+        for(int i = 0; i < COMPARE_CNT; i++)
+        {
+            DFEVar new_record   = (length[i] + i).cast(TEMP_TYPE) > tailReach;
+            tailReach          = new_record ? (length[i] + i).cast(TEMP_TYPE) : tailReach;
+            tailIndex          = new_record ? i : tailIndex;
+            tailLength         = new_record ? length[i] : tailLength;
+        }
+        // the match in this window is defined as tail match
+        DFEVar tail = tailIndex;
+        
+        // There are times that TAIL overlaps with HEAD, if so, we truncate the tail match 
+        // If the tail match length is too short, the tail match is not valid
+        tailLength = tail < head ? tailLength - (head - tail).cast(LENGTH_TYPE) : tailLength;
+        DFEVar tailValid = tailLength > constant.var(LENGTH_TYPE, 2);
+        DFEVar head_valid = stream.offset(tailValid, -1);
+        
+        DFEVar covered[]    = new DFEVar[COMPARE_CNT];
+        DFEVar valid[]      = new DFEVar[COMPARE_CNT];
+        DFEVar longest[]    = new DFEVar[COMPARE_CNT-1]; 
+       
+        DFEVar offsetNew[] = new DFEVar[COMPARE_CNT];
+        DFEVar length_new[] = new DFEVar[COMPARE_CNT];
+        for(int i = 0; i < COMPARE_CNT; i++)
+        {
+            DFEVar encode_until;
+            if(i == 0)
+                encode_until = head_valid ? head : constant.var(TEMP_TYPE, 0);
+            else
+                encode_until = longest[i - 1];
+            
+            DFEVar now      = constant.var(TEMP_TYPE, i);
+            DFEVar reach    = (i + length[i]).cast(TEMP_TYPE);
+            
+            encode_until    = now < encode_until ? encode_until : now;
+
+            covered[i]      = (now < encode_until) | (tailValid & now >= tail & now < tailReach);
+            
+            // if encode starts from later position, there is a shift here 
+            offsetNew[i]   = offset[i] + (encode_until - now).cast(OFFSET_TYPE); 
+            
+            length_new[i]   = (reach < tail | ~tailValid | tailIndex.eq(i)) ? (reach - encode_until) : (tail - encode_until);
+            valid[i]        = (length_new[i] > constant.var(TEMP_TYPE, MAX_UNCODED));
+            if(i != COMPARE_CNT - 1)
+            {
+                longest[i]      = valid[i] ? encode_until + length_new[i] : encode_until;
+            }
+        }
+        
+        // Output data in this window
+        DFEVar validBits[] = new DFEVar[COMPARE_CNT]; 
+        DFEVar dataBits[]  = new DFEVar[COMPARE_CNT];
+        DFEType BUFFER_TYPE = dfeUInt(32);  
+        
+        for(int i = 0; i < COMPARE_CNT; i++)
+        {
+            DFEVar encodedOrNot   = valid[i] | ~covered[i];
+            DFEVar encodedLength   = valid[i] ? constant.var(dfeUInt(8), ENCODED_LENGTH) : constant.var(dfeUInt(8), UNENCODED_LENGTH); 
+            
+            validBits[i]   = encodedOrNot ? encodedLength : 0;
+        
+            DFEVar dataLittleEndian = 
+                (offsetNew[i] << 4 | offsetNew[i] >> 8).cast(BUFFER_TYPE) << LENGTH_BITS 
+                | (length_new[i] - MAX_UNCODED - 1).cast(BUFFER_TYPE);  
+
+            dataBits[i]    = valid[i] ? 
+                dataLittleEndian
+                : 
+                (constant.var(BUFFER_TYPE, 1) << 8)     | bytes[i].cast(BUFFER_TYPE);
+        }
+        
+        DFEVector<DFEVar> DataBits  = (new DFEVectorType<DFEVar>(dfeUInt(32),    COMPARE_CNT)).newInstance(this);
+        DFEVector<DFEVar> ValidBits = (new DFEVectorType<DFEVar>(dfeUInt(8),     COMPARE_CNT)).newInstance(this);
+        for(int i = 0; i < COMPARE_CNT; i++)
+        {
+            DataBits[i]     <== dataBits[i];
+            ValidBits[i]    <== validBits[i];
+        }
+        io.output("dataBits",   DataBits,   DataBits.getType());
+        io.output("validBits",  ValidBits,  ValidBits.getType());
+    }   
+}
+
