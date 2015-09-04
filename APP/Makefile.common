@@ -25,8 +25,8 @@ DFEMAXDIR=$(MAXCOMPILER_BUILD_DIR)/$(PRJ)_$(DFEModel)_DFE/results
 MAXELEROSDIR_SIM:=$(MAXCOMPILERDIR)/lib/maxeleros-sim
 
 # ---- Source files ----
-ENGINEFILES=$(wildcard ../src/*.maxj)
-CPUFILES=$(wildcard ../src/*.c ../src/*.cpp)
+ENGINEFILES=$(wildcard ../src/EngineCode/*.maxj)
+CPUFILES=$(wildcard ../src/CPUCode/*.c ../src/CPUCode/*.cpp)
 
 # ---- Compiler settings ----
 

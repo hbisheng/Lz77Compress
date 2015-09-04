@@ -1,0 +1,153 @@
+/*
+    MatchingKernel module:
+    
+    input: 
+        {COMPARE_CNT} bytesToStore
+        {COMPARE_CNT} bytesToCompare
+        {COMPARE_CNT} indices
+    do:
+        1. For each index, history data starting from this index will be extracted and aligned using a crossbar.
+        2. The bytesToStore are stored in the history buffer.
+        3. For each index, compare the history data and the bytesToCompare(the current input window) to see how long the match is.
+
+    output: 
+        The information about the longest match from this position: Length and Offset
+ */
+
+import com.maxeler.maxcompiler.v2.kernelcompiler.Kernel;
+import com.maxeler.maxcompiler.v2.kernelcompiler.KernelParameters;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.base.*;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVector;
+import com.maxeler.maxcompiler.v2.kernelcompiler.types.composite.DFEVectorType;
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.memory.Memory;  
+import com.maxeler.maxcompiler.v2.kernelcompiler.stdlib.core.CounterChain;
+import com.maxeler.maxcompiler.v2.utils.MathUtils;
+
+class MatchingKernel extends Kernel {
+
+    private static final DFEType OUTPUT_TYPE    = dfeUInt(8);    
+    private static final DFEType COMPARE_TYPE   = dfeUInt(9);
+
+    protected MatchingKernel(KernelParameters parameters, int sequence, int COMPARE_CNT, int WINDOW_SIZE){
+        super(parameters);
+        int RAM_DEPTH = WINDOW_SIZE / COMPARE_CNT;
+        DFEVar UNDEFINED = constant.var(dfeUInt(9),260);
+        DFEType INDICE_TYPE = dfeUInt(MathUtils.bitsToAddress(WINDOW_SIZE));
+        
+        CounterChain chain      = control.count.makeCounterChain();
+        DFEVar cycleCount       = chain.addCounter(RAM_DEPTH, 1);
+        
+        DFEVector<DFEVar> indice            = io.input("index", 
+                    new DFEVectorType<DFEVar>(INDICE_TYPE, COMPARE_CNT));
+        DFEVector<DFEVar> bytesToStore      = io.input("bytesToStore", 
+                    new DFEVectorType<DFEVar>(dfeUInt(8), COMPARE_CNT));
+        DFEVector<DFEVar> bytesToCompare     = io.input("bytesToCompare", 
+                    new DFEVectorType<DFEVar>(COMPARE_TYPE, COMPARE_CNT));
+
+        // The following two modules form a data aligner
+        // 1. Different depths for different ram
+        DFEVar content[][] = new DFEVar[COMPARE_CNT][COMPARE_CNT];
+        for(int i = 0; i < COMPARE_CNT; i++)
+        {
+            // Allocate the history buffer
+            Memory<DFEVar> mappedRam = mem.alloc(dfeUInt(8), RAM_DEPTH);   
+            mappedRam.write(cycleCount, bytesToStore[i], constant.var(dfeBool(), 1));
+            
+            // Read the history data into content[][]      
+            for(int j = 0; j < COMPARE_CNT; j++)
+            {
+                DFEVar index = indice[j];
+                DFEVar readDepth = i < mod(index, COMPARE_CNT) ? div(index,COMPARE_CNT)+1: div(index, COMPARE_CNT);
+                content[j][i] = mappedRam.read(readDepth.cast(dfeUInt(9))).cast(COMPARE_TYPE);
+            }
+        }
+        
+        DFEVar matchLength[] = new DFEVar[COMPARE_CNT];
+        for(int j = 0; j < COMPARE_CNT; j++)
+        {
+            DFEVar index = indice[j];
+            
+            // Redress wrong content, when reading and writing conflicts
+            // Cond1: The index falls into the writing window
+            DFEVar sameWindow = div(index, COMPARE_CNT) === cycleCount.cast(INDICE_TYPE); 
+            DFEVar seq = mod(index, COMPARE_CNT);
+            for(int i = 0; i < COMPARE_CNT; i++)
+            {
+                content[j][i] = sameWindow ? 
+                                (   
+                                    i < sequence ? 
+                                    bytesToStore[i].cast(COMPARE_TYPE) 
+                                    : UNDEFINED
+                                ) 
+                                : content[j][i];
+            }
+
+            DFEVar nextWindow = mod( div(index, COMPARE_CNT) + 1, RAM_DEPTH ) === cycleCount.cast(INDICE_TYPE);
+            // Cond2: Parts of the reading fall into the writing window
+            for(int i = 0; i < COMPARE_CNT; i++)
+            {
+                content[j][i] = (nextWindow & ( seq > constant.var(INDICE_TYPE ,i)) ) ? 
+                                (
+                                    i < sequence ?
+                                    bytesToStore[i].cast(COMPARE_TYPE)
+                                    : UNDEFINED
+                                ) 
+                                : content[j][i];
+            }
+
+            // A cross bar to align the data just read
+            DFEVar var[] = new DFEVar[COMPARE_CNT];
+            for(int i = 0; i < COMPARE_CNT; i++)
+            {
+                var[i] = constant.var(COMPARE_TYPE,0);
+                for(int pos = 0; pos < COMPARE_CNT; pos++)
+                {
+                     var[i] = ( mod(i + mod(index, COMPARE_CNT), COMPARE_CNT) === pos ) ? content[j][pos] : var[i];
+                }
+            }
+            
+            // Compare to see how long the match can be
+            DFEVar matchLen = constant.var(OUTPUT_TYPE, COMPARE_CNT);
+            for(int i = COMPARE_CNT - 1; i >=0; i--)
+            {
+                matchLen = var[i] !== bytesToCompare[i] ? constant.var(OUTPUT_TYPE, i) : matchLen;
+            }
+            
+            matchLength[j] = matchLen;
+        }
+        
+        // Choose the longest match as output
+        DFEVar maxLength = constant.var(dfeUInt(8), 0);
+        DFEVar maxOffset = constant.var(INDICE_TYPE, 0);
+        for(int i = 0; i < COMPARE_CNT; i++)
+        {
+            DFEVar maxNew = matchLength[i] > maxLength;
+            maxLength = maxNew ? matchLength[i] : maxLength; 
+            maxOffset = maxNew ? indice[i] : maxOffset;
+        }
+
+        io.output("length", maxLength, maxLength.getType());
+        io.output("offset", maxOffset, INDICE_TYPE);
+        io.output("byte",   bytesToCompare[0].cast(dfeUInt(8)), dfeUInt(8)); 
+    } 
+
+    // C style operators: mod and div    
+    DFEVar mod(DFEVar dividend, int divisor)
+    {
+        DFEVar c = dividend.cast(dfeInt(32));
+        DFEVar q = c / divisor;
+        DFEVar r = c - q * divisor;
+        DFEVar val = r < 0 ? r + divisor : r;
+        return val.cast(dividend.getType());
+    }
+
+    DFEVar div(DFEVar dividend, int divisor)
+    {
+        DFEVar c = dividend.cast(dfeInt(32));
+        DFEVar q = c / divisor;
+        DFEVar val = q * divisor > c ? q - 1 : q;
+        return val.cast(dividend.getType());
+    }
+    
+}
+

@@ -25,7 +25,7 @@ WHEREISROOT=../
 
 
 # Assuming Kernel and Manager class names follow the pattern below:
-PRJ=Lz77Compress#MatrixMultiply
+PRJ=Lz77Compress
 KERNEL=$(PRJ)Kernel
 MANAGER=$(PRJ)Manager
 
