@@ -11,25 +11,10 @@ const int WINDOW_SIZE   = Lz77Compress_WINDOW_SIZE;
 const int MAX_UNCODED   = Lz77Compress_MAX_UNCODED;
 const int HASH_SIZE     = Lz77Compress_HASH_SIZE;
 
-void print_binary(uint32_t val, int depth)
-{
-    if(depth == 0)
-    {
-        return;
-    }
-    print_binary(val >> 1, depth - 1); 
-   
-    if(val & 1)
-        fprintf(stderr,"1");
-    else
-        fprintf(stderr,"0");
-    
-}
-
 int main(void)
 {
     // replicate the file to increase data size
-    int file_size_replication = 2;
+    int file_size_replication = 1;
     
     printf("Program starts\n");
     bool status = true;
