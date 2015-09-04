@@ -28,29 +28,28 @@ void print_binary(uint32_t val, int depth)
 
 int main(void)
 {
-    srand(time(NULL));
-    printf("#########################################################################################\n");
-    printf("Programming start\n");
-
-    bool status = true;
+    // replicate the file to increase data size
+    int file_size_replication = 2;
     
+    printf("Program starts\n");
+    bool status = true;
     std::ifstream in("file_input");
     std::string contents((std::istreambuf_iterator<char>(in)), 
     std::istreambuf_iterator<char>());
     
+    // truncate the input length because LMEM requires that the data size is a multiple of 384
     int len_input = (contents.length() / 384) * 384; 
     const char* char_inputs = contents.c_str();
    
-    int len_tmp = len_input;
-    len_input *= 1;
-     
-    printf("len_input:%d\n",len_input); 
+    int len_origin = len_input;
+    len_input *= file_size_replication;
+
+    printf("Input Length: %d bytes\n",len_input); 
     uint8_t* inputs = new uint8_t[len_input]; 
-    
-    FILE* input = fopen("input","wb");    
+    FILE* input = fopen("trunc_input","wb");    
     for(int i = 0; i < len_input; i++)
     {
-        inputs[i] = char_inputs[i % len_tmp];      
+        inputs[i] = char_inputs[i % len_origin];      
         fputc(inputs[i],input);
     }
     fclose(input);
@@ -64,53 +63,36 @@ int main(void)
     memset(output_data, 0, sizeof(output_data));
     memset(output_len,  0, sizeof(output_len));
     
-    uint8_t*    decode_res;
-    decode_res  = new uint8_t[len_output];
-    memset(decode_res,  0, sizeof(decode_res));
-
-    //freopen("running.log","w",stdout); 
     printf("-- Running dfe\n");
     struct timeval start, end;
+    // Send the input to LMEM
     gettimeofday( &start, NULL ); 
+    
     Lz77Compress_WriteLmem(len_input, inputs);
+    
     gettimeofday( &end, NULL );
     int load_time1 = (1000000 * ( end.tv_sec - start.tv_sec ) + end.tv_usec -start.tv_usec) / 1000;
-    //Lz77Compress(len_input, inputs, decode_res, output_data, output_len);
-    //Lz77Compress(len_input, inputs, output_data, output_len); 
     
+    // Run the DFE to get outputs
     gettimeofday( &start, NULL ); 
+    
     Lz77Compress(len_input);
+    
     gettimeofday( &end, NULL );
     int run_time = (1000000 * ( end.tv_sec - start.tv_sec ) + end.tv_usec -start.tv_usec) / 1000;
     
+    // Get the output from LMEM
     gettimeofday( &start, NULL);
+
     Lz77Compress_ReadLmem(len_input, output_data, output_len);
+    
     gettimeofday( &end, NULL );
     int load_time2 = (1000000 * ( end.tv_sec - start.tv_sec ) + end.tv_usec -start.tv_usec) / 1000;
-    fprintf(stderr, "-- \tDFE run time: %d ms  DFE bandwidth: %d MB/s\n", run_time, (len_input / run_time)/1000);
     fprintf(stderr, "-- \tDFE load time: %d ms\n", load_time1 + load_time2);
+    fprintf(stderr, "-- \tDFE run time: %d ms  DFE bandwidth: %d KB/s\n", run_time, (len_input / run_time));
     len_output = len_input;
       
-    for(int i = 0; i < len_output; i++)
-    {
-        /*
-        fprintf(stderr,"At %d: %d \t(len):%d \t(data):", i, inputs[i], output_len[i]);//%d (len)%d\n", i, output_data[i], output_len[i]);
-        print_binary(output_data[i], 16); 
-        int LENGTH_BITS = 3;        
-        uint32_t offset_temp = output_data[i] >> LENGTH_BITS;
-        offset_temp = (offset_temp << 8 | offset_temp >> 4) & 0x0FFF;
-        uint8_t length_temp = (output_data[i] & 0x7) + MAX_UNCODED + 1;
-        // handle boundary cases
-        fprintf(stderr,"\toffset:%d  length:%d, FSM_output:%d\n", 
-                    offset_temp, length_temp, decode_res[i]);
-        if(inputs[i] != decode_res[i])
-        {
-            fprintf(stderr,"!!!!!!!!!decode failed at %d\n", i);
-            status = false;
-        }
-        */
-    }
-    
+    // CPUcodes that organize the DFE outputs and output as file
     printf("-- Collect DFE outputs\n");
     gettimeofday( &start, NULL );
     FILE* fp_out = fopen("dfe_encode","wb");
@@ -147,24 +129,24 @@ int main(void)
     gettimeofday( &end, NULL );
     int timeuse = (1000000 * ( end.tv_sec - start.tv_sec ) + end.tv_usec - start.tv_usec) / 1000;
     fprintf(stderr,"-- \tCollect time: %d ms\n", timeuse);
-    fprintf(stderr, "-- \tDFE overall speed: %d MB/s", (len_input/(load_time1 + run_time + load_time2))/1000 );
+    fprintf(stderr, "-- \tDFE overall speed: %d KB/s", (len_input/(load_time1 + run_time + load_time2 + timeuse)));
 
     printf("-- Decoding using CPU code\n");
-    system("./sample -d -i dfe_encode -o dfe_decode");
+    system("../../ORIG/software/Lz77Compress -d -i dfe_encode -o dfe_decode");
     
-    printf("-- Checking output\n"); 
+    printf("-- Checking the decoded output\n"); 
     std::ifstream in2("dfe_decode");
     std::string decode_contents((std::istreambuf_iterator<char>(in2)), 
     std::istreambuf_iterator<char>());
     const char* decode_results = decode_contents.c_str();
     int error_cnt = 0;
-    if(decode_contents.length() != len_input)
+    if((int)decode_contents.length() != len_input)
     {   
-        fprintf(stderr, "failed! decode size should be %d instead of %d\n", len_input, decode_contents.length());
+        fprintf(stderr, "failed! decode size should be %d instead of %d\n", len_input, (int)decode_contents.length());
     }   
     else
     {   
-        for(int i = 0; i < decode_contents.length(); i++)
+        for(int i = 0; i < (int)decode_contents.length(); i++)
         {   
             if((uint8_t)decode_results[i] != inputs[i])
             {   
@@ -178,7 +160,7 @@ int main(void)
     printf("-- Encode using CPU\n");
     gettimeofday( &start, NULL );
 
-    system("./sample -c -i input -o cpu_encode");
+    system("../../ORIG/software/Lz77Compress -c -i trunc_input -o cpu_encode");
     
     gettimeofday( &end, NULL );
     timeuse = (1000000 * ( end.tv_sec - start.tv_sec ) + end.tv_usec -start.tv_usec) / 1000;
@@ -201,10 +183,9 @@ int main(void)
     }
     else
     {
-        fprintf(stderr,"!!!!!!!!Oops, decode failed  ERROR number:%d\n",error_cnt);
+        fprintf(stderr,"!!!!!!!!Oops, decode failed");
     }
-    
-    printf("#########################################################################################\n");
+    printf("Program ends\n");
     
     return 0;
 }
